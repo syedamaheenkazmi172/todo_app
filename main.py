@@ -66,7 +66,7 @@ async def get_task(task_id:int):
 
 @app.put("/tasks/{task_id}",response_model=Task)
 async def update_task(task_id:int,updated_task:TaskIn):
-    query = tasks_table.update().where(tasks_table.c.id == task_id).values(**task.dict())
+    query = tasks_table.update().where(tasks_table.c.id == task_id).values(**updated_task.dict())
     await database.execute(query)
     return Task(id=task_id, **updated_task.dict())
 
