@@ -1,60 +1,87 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
+import sqlalchemy
+import databases
+
+database_url="postgresql://postgres:forensics@localhost:5432/todo_db" 
+
+#to setup connection
+database=databases.Database(database_url) #connects to the database with database_url mentioned above
+metadata=sqlalchemy.MetaData()#to store the tasks in the form of table in database where sqlalchemy translates the information into sql
+
+tasks_table=sqlalchemy.Table(
+    "tasks",
+    metadata, 
+    sqlalchemy.Column("id",sqlalchemy.Integer,primary_key=True),
+    sqlalchemy.Column("title",sqlalchemy.String),
+    sqlalchemy.Column("complete",sqlalchemy.Boolean,default=False),
+)
+
+#connecting it to postgresql
+engine=sqlalchemy.create_engine(database_url)
+metadata.create_all(engine)
 
 app=FastAPI() #this way app inherits all parameters and functions of FastAPI
 
-class Task(BaseModel):
-    id:int
-    title:str
-    complete:bool =False
+class TaskIn(BaseModel):
+    title: str
+    complete: bool = False
+class Task(TaskIn):
+    id: int
 
-tasks:List[Task]=[]#this creates a list of several tasks
+#connect to database on startup/shut down
+@app.on_event("startup")
+async def startup():
+    await database.connect() #await fetches the data from the database
 
-@app.get("/") #this gets nothing
-def read():
-    return {"message": "Welcome to To-Do App"}
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
 
-@app.get("/tasks")
-def all_tasks():
-    return sorted(tasks, key=lambda x: x.id)
+#routes
+
+#@app.get("/",tags=["Welcome"])
+#def welcome():
+#    return {"message": "Welcome to To-Do App"}
+
+@app.post("/tasks",response_model=Task)
+async def create_tasks(task:TaskIn):
+    query=tasks_table.insert().values(title=task.title,complete=task.complete)
+    task_id=await database.execute(query) #creates an id automatically using sql
+    return Task(id=task_id,**task.dict())
+
+@app.get("/tasks",response_model=List[Task])
+async def all_tasks():
+    query = tasks_table.select().order_by(tasks_table.c.complete, tasks_table.c.id)
+    return await database.fetch_all(query)
 
 @app.get("/tasks/{task_id}",response_model=Task)
-def get_task(task_id:int):
-    for task in tasks:
-        if task.id==task_id:
-            return task
-    raise HTTPException(status_code=404,detail="Task not found")
-
-@app.post("/tasks")
-def create_tasks(task:Task):
-    for t in tasks:
-        if t.id==task.id:
-            raise HTTPException(status_code=400,detail="Task ID already exists")
-    tasks.append(task)
-    return task
+async def get_task(task_id:int):
+    query = tasks_table.select().where(tasks_table.c.id == task_id)
+    task=await database.fetch_one(query)
+    if task is None:
+        raise HTTPException(status_code=404,detail="Task not found")
+    return task    
 
 @app.put("/tasks/{task_id}",response_model=Task)
-def update_task(task_id:int,updated_task:Task):
-    for i,t in enumerate(tasks):
-        if t.id==task_id:
-            tasks[i]=updated_task
-            return updated_task
-    raise HTTPException(status_code=404,detail="Task not found")
+async def update_task(task_id:int,updated_task:TaskIn):
+    query = tasks_table.update().where(tasks_table.c.id == task_id).values(**task.dict())
+    await database.execute(query)
+    return Task(id=task_id, **updated_task.dict())
 
 #to update the status to complete
 @app.patch("/tasks/{task_id}/complete",response_model=Task)
-def mark_completed(task_id:int):
-    for task in tasks:
-        if task_id==task.id:
-            task.complete=True
-            return task
-    raise HTTPException(status_code=404,detail="Task not found")
+async def mark_completed(task_id:int):
+    task=await database.fetch_one(tasks_table.select().where(tasks_table.c.id==task_id))
+    if not task:
+        raise HTTPException(status_code=404,detail="Task not found")
+    update=tasks_table.update().where(tasks_table.c.id==task_id).values(complete=True)
+    await database.execute(update)
+    return Task(id=task_id,title=task["title"],complete=True)
 
 @app.delete("/tasks/{task_id}")
-def delete_task(task_id:int):
-    for i,t in enumerate(tasks):
-        if t.id==task_id:
-            tasks.pop(i)
-            return {"message":"task deleted"}
-    raise HTTPException(status_code=404,detail="Task not found")
+async def delete_task(task_id:int):
+    query = tasks_table.delete().where(tasks_table.c.id == task_id)
+    await database.execute(query)
+    return {"message": "Task deleted"}
